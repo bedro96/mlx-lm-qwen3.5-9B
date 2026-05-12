@@ -1,0 +1,534 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Smart Factory Agent</title>
+  <script src="https://cdn.jsdelivr.net/npm/marked@15/marked.min.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      background: #0f1117;
+      color: #e2e8f0;
+      display: flex;
+      flex-direction: column;
+      height: 100dvh;
+    }
+
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 12px 20px;
+      border-bottom: 1px solid #2d3748;
+      background: #1a1f2e;
+      gap: 12px;
+    }
+
+    header h1 { font-size: 1rem; font-weight: 600; color: #68d391; }
+
+    #model-badge {
+      font-size: 0.72rem;
+      background: #2d3748;
+      border-radius: 999px;
+      padding: 2px 10px;
+      color: #a0aec0;
+      white-space: nowrap;
+    }
+
+    .think-toggle {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 0.8rem;
+      color: #a0aec0;
+      cursor: pointer;
+      user-select: none;
+    }
+
+    .think-toggle input[type="checkbox"] {
+      accent-color: #68d391;
+      width: 15px; height: 15px;
+      cursor: pointer;
+    }
+
+    #messages {
+      flex: 1;
+      overflow-y: auto;
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+
+    .msg {
+      max-width: 720px;
+      padding: 10px 14px;
+      border-radius: 10px;
+      line-height: 1.6;
+      font-size: 0.9rem;
+      word-break: break-word;
+    }
+
+    .msg.user {
+      white-space: pre-wrap;
+      align-self: flex-end;
+      background: #2d3748;
+      color: #fbd38d;
+    }
+
+    .agent-shell {
+      align-self: flex-start;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      max-width: 720px;
+      width: 100%;
+    }
+
+    .msg.agent {
+      background: #1a2535;
+      color: #e2e8f0;
+      border: 1px solid #2d3748;
+    }
+
+    .msg.agent.streaming::after {
+      content: "▍";
+      animation: blink 0.7s step-end infinite;
+    }
+
+    .thinking-box {
+      border: 1px solid #364152;
+      border-radius: 10px;
+      background: #131a25;
+      color: #cbd5e0;
+      overflow: hidden;
+    }
+
+    .thinking-box summary {
+      cursor: pointer;
+      list-style: none;
+      padding: 10px 14px;
+      font-size: 0.85rem;
+      font-weight: 600;
+      color: #cbd5e0;
+      background: #161f2d;
+    }
+
+    .thinking-box summary::-webkit-details-marker { display: none; }
+
+    .msg.thinking {
+      max-width: none;
+      background: transparent;
+      color: #a0aec0;
+      border-radius: 0;
+      padding-top: 0;
+    }
+
+    @keyframes blink { 50% { opacity: 0; } }
+
+    .msg.error { background: #3d1515; border-color: #e53e3e; color: #fc8181; }
+
+    /* Rendered markdown inside agent messages */
+    .msg.agent p { margin: 0.4em 0; }
+    .msg.agent p:first-child { margin-top: 0; }
+    .msg.agent p:last-child { margin-bottom: 0; }
+    .msg.agent h1, .msg.agent h2, .msg.agent h3,
+    .msg.agent h4, .msg.agent h5, .msg.agent h6 {
+      margin: 0.6em 0 0.3em; font-weight: 600; color: #68d391;
+    }
+    .msg.agent h1 { font-size: 1.3em; }
+    .msg.agent h2 { font-size: 1.15em; }
+    .msg.agent h3 { font-size: 1.05em; }
+    .msg.agent strong { color: #fbd38d; }
+    .msg.agent em { color: #bee3f8; }
+    .msg.agent code {
+      background: #2d3748; padding: 2px 6px; border-radius: 4px;
+      font-size: 0.88em; font-family: 'SF Mono', Menlo, monospace;
+    }
+    .msg.agent pre {
+      background: #1a202c; border: 1px solid #2d3748; border-radius: 6px;
+      padding: 10px 12px; overflow-x: auto; margin: 0.5em 0;
+    }
+    .msg.agent pre code {
+      background: none; padding: 0; border-radius: 0; font-size: 0.85em;
+    }
+    .msg.agent ul, .msg.agent ol {
+      margin: 0.4em 0; padding-left: 1.5em;
+    }
+    .msg.agent li { margin: 0.15em 0; }
+    .msg.agent blockquote {
+      border-left: 3px solid #4a5568; margin: 0.5em 0;
+      padding: 4px 12px; color: #a0aec0;
+    }
+    .msg.agent table {
+      border-collapse: collapse; margin: 0.5em 0; width: 100%;
+    }
+    .msg.agent th, .msg.agent td {
+      border: 1px solid #4a5568; padding: 4px 8px; font-size: 0.85em;
+    }
+    .msg.agent th { background: #2d3748; }
+    .msg.agent a { color: #63b3ed; text-decoration: underline; }
+    .msg.agent hr { border: none; border-top: 1px solid #4a5568; margin: 0.6em 0; }
+
+    footer {
+      padding: 14px 20px;
+      border-top: 1px solid #2d3748;
+      background: #1a1f2e;
+      display: flex;
+      gap: 10px;
+    }
+
+    #input {
+      flex: 1;
+      background: #2d3748;
+      border: 1px solid #4a5568;
+      border-radius: 8px;
+      color: #e2e8f0;
+      padding: 10px 14px;
+      font-size: 0.9rem;
+      resize: none;
+      min-height: 44px;
+      max-height: 140px;
+      overflow-y: auto;
+      outline: none;
+    }
+
+    #input:focus { border-color: #68d391; }
+
+    #send {
+      background: #2f855a;
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      padding: 0 20px;
+      font-size: 0.9rem;
+      cursor: pointer;
+      align-self: flex-end;
+      height: 44px;
+    }
+
+    #send:disabled { background: #2d3748; color: #718096; cursor: not-allowed; }
+    #send:not(:disabled):hover { background: #276749; }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>🏭 Smart Factory Agent</h1>
+  <span id="model-badge">loading model…</span>
+  <label class="think-toggle">
+    <input type="checkbox" id="think-toggle" />
+    Thinking mode
+  </label>
+</header>
+
+<div id="messages"></div>
+
+<footer>
+  <textarea id="input" rows="1" placeholder="Ask about factory operations…"></textarea>
+  <button id="send">Send</button>
+</footer>
+
+<script>
+  const messagesEl = document.getElementById('messages');
+  const inputEl = document.getElementById('input');
+  const sendBtn = document.getElementById('send');
+  const thinkChk = document.getElementById('think-toggle');
+  const modelBadge = document.getElementById('model-badge');
+
+  marked.setOptions({ gfm: true, breaks: true });
+
+  // Detect bullet * stuck mid-line by checking for unpaired opening *.
+  function fixBulletsInLine(line) {
+    let result = '';
+    let singleStarCount = 0;
+    for (let i = 0; i < line.length; i++) {
+      if (line[i] === '*') {
+        if (i + 1 < line.length && line[i + 1] === '*') {
+          result += '**'; i++; continue;
+        }
+        if (i > 0 && line[i - 1] !== ' ' && line[i - 1] !== '*'
+            && i + 1 < line.length && line[i + 1] === ' ') {
+          if (singleStarCount % 2 === 0) {
+            result += '\n* '; i++; continue;
+          }
+        }
+        singleStarCount++;
+      }
+      result += line[i];
+    }
+    return result;
+  }
+
+  // Convert tab-separated table lines into pipe-separated markdown tables.
+  function fixTabTables(text) {
+    const lines = text.split('\n');
+    const result = [];
+    let i = 0;
+    while (i < lines.length) {
+      const tabCount = (lines[i].match(/\t/g) || []).length;
+      if (tabCount >= 1) {
+        // Collect consecutive lines with the same tab count.
+        const tableLines = [lines[i]];
+        let j = i + 1;
+        while (j < lines.length && (lines[j].match(/\t/g) || []).length === tabCount) {
+          tableLines.push(lines[j]);
+          j++;
+        }
+        if (tableLines.length >= 2) {
+          for (let k = 0; k < tableLines.length; k++) {
+            const cells = tableLines[k].split('\t').map(c => c.trim());
+            result.push('| ' + cells.join(' | ') + ' |');
+            if (k === 0) {
+              result.push('| ' + cells.map(() => '---').join(' | ') + ' |');
+            }
+          }
+          i = j;
+          continue;
+        }
+      }
+      result.push(lines[i]);
+      i++;
+    }
+    return result.join('\n');
+  }
+
+  function fixRunOnMeasurements(text) {
+    return text.replace(
+      /\b([A-Za-z]{1,12})(\d+(?:\.\d+)?)(?=\s?(?:°[CF]|°|%|bar\b|psi\b|rpm\b|Hz\b|kg\b|g\b|mm\b|cm\b|km\b|m\b))/g,
+      '$1 $2'
+    );
+  }
+
+  function fixTemperatureUnits(text) {
+    return text.replace(/(\d+(?:\.\d+)?(?:[-–]\d+(?:\.\d+)?)?)°([CF])/g, '$1 °$2');
+  }
+
+  // Per-line bold normalizer. Pairs ** positionally (1st=open, 2nd=close, ...),
+  // trims inner whitespace, ensures spacing outside the span, and drops any
+  // orphan unpaired ** so literal asterisks never reach the renderer.
+  function normalizeBoldSpans(line) {
+    const parts = line.split('**');
+    if (parts.length < 3) return line;
+    const wordRe = /[A-Za-z0-9\u00C0-\u024F\u0400-\u04FF\uAC00-\uD7A3]/u;
+    const pairs = Math.floor((parts.length - 1) / 2);
+    let out = parts[0];
+    for (let p = 0; p < pairs; p++) {
+      const beforeIdx = 2 * p;
+      const innerIdx = 2 * p + 1;
+      const afterIdx = 2 * p + 2;
+      const before = out;
+      const inner = parts[innerIdx].trim();
+      const after = parts[afterIdx];
+      if (inner.length === 0) {
+        out = before + after;
+        continue;
+      }
+      const prevChar = before.slice(-1);
+      const nextChar = after.charAt(0);
+      const needLead = prevChar && wordRe.test(prevChar) ? ' ' : '';
+      const needTrail = nextChar && wordRe.test(nextChar) ? ' ' : '';
+      out = before + needLead + '**' + inner + '**' + needTrail + after;
+    }
+    if (parts.length % 2 === 0) {
+      out += parts[parts.length - 1];
+    }
+    return out;
+  }
+
+  function fixKnownRunOnPhrases(text) {
+    const repairs = [
+      [/\borderfor\b/gi, 'order for'],
+      [/\bthevibration\b/gi, 'the vibration'],
+      [/\bworkorder\b/gi, 'work order'],
+    ];
+
+    for (const [pattern, replacement] of repairs) {
+      text = text.replace(pattern, replacement);
+    }
+    return text;
+  }
+
+  // Fix common LLM markdown quirks before parsing.
+  function fixLlmMarkdown(text) {
+    // 1. Bullet fix FIRST — split "text* item" onto separate lines.
+    text = text.split('\n').map(fixBulletsInLine).join('\n');
+
+    // 2. Bold normalization: pair ** positionally per line, trim inside,
+    //    add spacing outside, drop orphan unpaired **.
+    text = text.split('\n').map(normalizeBoldSpans).join('\n');
+    // Inline code spacing: `code`word → `code` word
+    text = text.replace(/(`[^`\n]+`)(?=[A-Za-z0-9\u00C0-\u024F\u0400-\u04FF\uAC00-\uD7A3])/gu, '$1 ');
+
+    // 4. Italic: *text * → *text* (space before closing *)
+    text = text.replace(/(?<!\*)\*(?!\*)(.+?)[^\S\n]+\*(?!\*)/g, '*$1*');
+    // Italic: * text* → *text* (space after opening *)
+    text = text.replace(/(?<!\*)\*[^\S\n]+([^\s*].*?)\*(?!\*)/g, '*$1*');
+
+    // 5. Fix common LLM run-on tokens that break readability after rendering.
+    text = fixRunOnMeasurements(text);
+    text = fixTemperatureUnits(text);
+    text = fixKnownRunOnPhrases(text);
+
+    // 6. Tab-separated tables → pipe-separated markdown tables.
+    text = fixTabTables(text);
+
+    return text;
+  }
+
+  function renderMarkdown(text) {
+    return marked.parse(fixLlmMarkdown(text));
+  }
+
+  const history = [{ role: 'system', content: {{ system_prompt | tojson }} }];
+
+  fetch('/models').then(r => r.json()).then(d => {
+    modelBadge.textContent = d.model.split('/').pop();
+  }).catch(() => { modelBadge.textContent = 'unknown model'; });
+
+  function scrollToBottom() {
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+  }
+
+  function appendMsg(role, text) {
+    const el = document.createElement('div');
+    el.className = `msg ${role}`;
+    el.textContent = text;
+    messagesEl.appendChild(el);
+    scrollToBottom();
+    return el;
+  }
+
+  function appendAgentMessage(showThinking) {
+    const shell = document.createElement('div');
+    shell.className = 'agent-shell';
+
+    let thinkingBox = null;
+    let thinkingEl = null;
+    if (showThinking) {
+      thinkingBox = document.createElement('details');
+      thinkingBox.className = 'thinking-box';
+      thinkingBox.hidden = true;
+      thinkingBox.open = true;
+
+      const summary = document.createElement('summary');
+      summary.textContent = '💭 Thinking...';
+
+      thinkingEl = document.createElement('div');
+      thinkingEl.className = 'msg thinking';
+
+      thinkingBox.append(summary, thinkingEl);
+      shell.appendChild(thinkingBox);
+    }
+
+    const answerEl = document.createElement('div');
+    answerEl.className = 'msg agent';
+    shell.appendChild(answerEl);
+    messagesEl.appendChild(shell);
+    scrollToBottom();
+
+    return { answerEl, thinkingBox, thinkingEl };
+  }
+
+  async function send() {
+    const text = inputEl.value.trim();
+    if (!text) return;
+
+    inputEl.value = '';
+    inputEl.style.height = '';
+    sendBtn.disabled = true;
+
+    appendMsg('user', text);
+    history.push({ role: 'user', content: text });
+
+    const { answerEl, thinkingBox, thinkingEl } = appendAgentMessage(thinkChk.checked);
+    answerEl.classList.add('streaming');
+
+    let reply = '';
+    let thinking = '';
+
+    try {
+      const resp = await fetch('/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          messages: history,
+          enable_thinking: thinkChk.checked,
+        }),
+      });
+
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      if (!resp.body) throw new Error('Response body missing');
+
+      const reader = resp.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let done = false;
+
+      while (!done) {
+        const chunk = await reader.read();
+        done = chunk.done;
+        buffer += decoder.decode(chunk.value || new Uint8Array(), { stream: !done });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() ?? '';
+
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue;
+          const raw = line.slice(6).trim();
+          if (raw === '[DONE]') {
+            done = true;
+            break;
+          }
+
+          const parsed = JSON.parse(raw);
+          if (parsed.error) {
+            answerEl.classList.add('error');
+            answerEl.textContent = `Error: ${parsed.error}`;
+            return;
+          }
+
+          if (parsed.kind === 'thinking' && thinkingBox && thinkingEl) {
+            thinkingBox.hidden = false;
+            thinking += parsed.token || '';
+            thinkingEl.textContent = thinking;
+            scrollToBottom();
+            continue;
+          }
+
+          if (parsed.kind === 'answer' || parsed.token) {
+            reply += parsed.token || '';
+            answerEl.innerHTML = renderMarkdown(reply);
+            scrollToBottom();
+          }
+        }
+      }
+
+      history.push({ role: 'assistant', content: reply });
+      if (thinkingBox && !thinking) {
+        thinkingBox.remove();
+      }
+    } catch (err) {
+      answerEl.classList.add('error');
+      const message = err instanceof Error ? err.message : String(err);
+      answerEl.textContent = `Connection error: ${message}`;
+    } finally {
+      answerEl.classList.remove('streaming');
+      sendBtn.disabled = false;
+      inputEl.focus();
+    }
+  }
+
+  sendBtn.addEventListener('click', send);
+  inputEl.addEventListener('keydown', e => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
+  });
+  inputEl.addEventListener('input', () => {
+    inputEl.style.height = '';
+    inputEl.style.height = Math.min(inputEl.scrollHeight, 140) + 'px';
+  });
+</script>
+</body>
+</html>

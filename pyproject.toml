@@ -1,0 +1,35 @@
+[project]
+name = "mlx-lm-qwen3.5-9B"
+version = "0.1.0"
+description = "Smart Factory Agent — local MLX LLM via OpenAI-compatible API"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "flask>=3.1.3",
+    "foundry-local-sdk>=1.1.0",
+    "httpx>=0.28.1",
+    "mcp>=1.27.1",
+    "mlx-lm>=0.31.3",
+    "openai>=2.36.0",
+]
+
+[dependency-groups]
+dev = [
+    "bandit>=1.9.4",
+    "black>=26.3.1",
+    "flake8>=7.3.0",
+    "mypy>=2.0.0",
+]
+
+[tool.black]
+line-length = 99
+target-version = ["py313"]
+
+[tool.mypy]
+python_version = "3.13"
+strict = true
+files = ["main.py", "app.py", "client.py", "smoke_test.py"]
+
+[tool.bandit]
+targets = ["main.py", "app.py", "client.py", "smoke_test.py"]
+skips = ["B101"]  # assert statements are fine in non-security paths
