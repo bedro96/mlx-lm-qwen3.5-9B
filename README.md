@@ -69,8 +69,16 @@ foundry_local/
 
 The MLX LLM server provides an **OpenAI-compatible API** at `http://127.0.0.1:8080/v1`:
 
+
 ```zsh
-# Start the MLX inference server (downloads model on first run)
+# Enable virtual environment first. Start the MLX inference server (downloads model on first run)
+mlx_lm.server \
+  --model mlx-community/Qwen3.5-9B-MLX-4bit \
+  --port 8080
+```
+If this your second time, then
+```zsh
+# Once the model has been downloaded and cached, you can execute with following command.
 uvx --from mlx-lm mlx_lm.server
 ```
 
@@ -303,6 +311,13 @@ Final answer: The current temperature of FURNACE-001 is 880.2°C and within the 
 - [Qwen3.5-9B on HuggingFace](https://huggingface.co/Qwen/Qwen3.5-9B)
 - [mlx-community/Qwen3.5-9B-MLX-4bit](https://huggingface.co/mlx-community/Qwen3.5-9B-MLX-4bit)
 - [Qwen3.5 Official Blog](https://qwen.ai/blog?id=qwen3.5)
+
+---
+
+## 🎬 Screen Recording
+
+- [Actual_run_from_mac.mov](Actual_run_from_mac.mov)
+- [Actual_run_from_mac.mp4](Actual_run_from_mac.mp4)
 
 ---
 
