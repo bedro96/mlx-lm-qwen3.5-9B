@@ -154,8 +154,11 @@ def _build_request_args(
     return args
 
 
-async def run_tool_call(session: ClientSession, tool_call: ChatCompletionMessageToolCall) -> str:
-    """Execute a single tool call via the MCP session and return the result as a string."""
+async def run_tool_call(
+    sessions: dict[str, ClientSession],
+    tool_call: ChatCompletionMessageToolCall,
+) -> str:
+    """Execute a single tool call via the appropriate MCP session and return the result as a string."""
     name = tool_call.function.name
     try:
         arguments = json.loads(tool_call.function.arguments)
@@ -163,6 +166,10 @@ async def run_tool_call(session: ClientSession, tool_call: ChatCompletionMessage
         return json.dumps({"error": f"Invalid JSON arguments: {tool_call.function.arguments}"})
 
     print(f"{CYAN}  🔧 Calling tool: {name}({json.dumps(arguments, ensure_ascii=False)}){RESET}")
+
+    session = sessions.get(name)
+    if session is None:
+        return json.dumps({"error": f"No MCP session found for tool '{name}'"})
 
     result = await session.call_tool(name, arguments)
     # MCP returns a list of content blocks; concatenate text content.
@@ -175,7 +182,7 @@ async def chat_completion_with_tools(
     model: str,
     messages: list[ChatCompletionMessageParam],
     tools: list[dict[str, Any]],
-    session: ClientSession,
+    sessions: dict[str, ClientSession],
     enable_thinking: bool,
 ) -> str:
     """Run a chat completion and handle tool calls until the model returns final text."""
@@ -195,7 +202,7 @@ async def chat_completion_with_tools(
             messages.append(cast(ChatCompletionMessageParam, msg.to_dict()))
 
             for tc in msg.tool_calls:
-                tool_result = await run_tool_call(session, tc)
+                tool_result = await run_tool_call(sessions, tc)
                 messages.append(
                     cast(
                         ChatCompletionMessageParam,
@@ -235,31 +242,53 @@ async def async_main(enable_thinking: bool) -> None:
     llm_client = make_client()
     model = resolve_model(llm_client)
 
-    # 2. Start MCP server and connect.
-    server_params = StdioServerParameters(command="uv", args=["run", "mcp_server.py"])
-    async with stdio_client(server_params) as (read, write):
-        async with ClientSession(read, write) as session:
-            await session.initialize()
+    # 2. Start both MCP servers and connect.
+    factory_params = StdioServerParameters(command="uv", args=["run", "mcp_server.py"])
+    web_params = StdioServerParameters(command="uv", args=["run", "mcp_web_server.py"])
+    async with (
+        stdio_client(factory_params) as (r_factory, w_factory),
+        stdio_client(web_params) as (r_web, w_web),
+    ):
+        async with (
+            ClientSession(r_factory, w_factory) as factory_session,
+            ClientSession(r_web, w_web) as web_session,
+        ):
+            await factory_session.initialize()
+            await web_session.initialize()
 
-            # 3. Discover MCP tools.
-            tool_list = await session.list_tools()
-            openai_tools = mcp_tools_to_openai(tool_list.tools)
-            tool_names = [t["function"]["name"] for t in openai_tools]
+            # 3. Discover tools from both servers and build a name→session map.
+            factory_tool_list = await factory_session.list_tools()
+            web_tool_list = await web_session.list_tools()
+
+            all_mcp_tools = factory_tool_list.tools + web_tool_list.tools
+            openai_tools = mcp_tools_to_openai(all_mcp_tools)
+
+            # Map each tool name to the session that owns it.
+            tool_sessions: dict[str, ClientSession] = {}
+            for t in factory_tool_list.tools:
+                tool_sessions[t.name] = factory_session
+            for t in web_tool_list.tools:
+                tool_sessions[t.name] = web_session
+
+            factory_names = [t.name for t in factory_tool_list.tools]
+            web_names = [t.name for t in web_tool_list.tools]
 
             think_status = "thinking ON" if enable_thinking else "thinking OFF"
             print(
                 f"{GREEN}Smart Factory Agent ready (MCP mode).\n"
                 f"  Model: {model} | {think_status}\n"
-                f"  MCP tools: {', '.join(tool_names)}\n"
+                f"  Factory tools : {', '.join(factory_names)}\n"
+                f"  Web tools     : {', '.join(web_names)}\n"
                 f"  Type 'exit' to quit.{RESET}\n"
             )
 
             # Enhanced system prompt with tool awareness.
             system_prompt = (
-                SYSTEM_PROMPT + "\n\nYou have access to real-time factory sensor tools. "
-                "When a user asks about machine temperatures or factory conditions, "
-                "use the available tools to get actual sensor data before answering. "
-                "Always call get_machine_temperature or list_machines when relevant."
+                SYSTEM_PROMPT
+                + "\n\nYou have access to real-time factory sensor tools AND web browsing tools. "
+                "Use get_machine_temperature or list_machines for factory sensor data. "
+                "Use web_search to search the internet for up-to-date information, "
+                "and fetch_page to read the full content of a specific URL."
             )
 
             messages: list[ChatCompletionMessageParam] = [
@@ -287,7 +316,7 @@ async def async_main(enable_thinking: bool) -> None:
 
                 try:
                     reply = await chat_completion_with_tools(
-                        llm_client, model, messages, openai_tools, session, enable_thinking
+                        llm_client, model, messages, openai_tools, tool_sessions, enable_thinking
                     )
                     messages.append({"role": "assistant", "content": reply})
                 except Exception as exc:

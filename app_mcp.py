@@ -44,12 +44,14 @@ _NO_THINK_TOP_K = 20
 _NO_THINK_MAX_TOKENS = 10240
 
 _TOOL_PROMPT_SUFFIX = (
-    "You are master of solving difficult problems."
-    "When a user asks about general query try to answer with best of your knowledge. "
-    "use the available tools to get actual sensor data before answering. "
+    "You have access to real-time factory sensor tools AND web browsing tools. "
+    "Use get_machine_temperature or list_machines for factory sensor data. "
+    "Use web_search to search the internet for up-to-date information, "
+    "and fetch_page to read the full content of a specific URL."
 )
 _TOOL_AWARE_SYSTEM_PROMPT = f"{SYSTEM_PROMPT}\n\n{_TOOL_PROMPT_SUFFIX}"
-_MCP_SERVER_PARAMS = StdioServerParameters(command="uv", args=["run", "mcp_server.py"])
+_MCP_FACTORY_PARAMS = StdioServerParameters(command="uv", args=["run", "mcp_server.py"])
+_MCP_WEB_PARAMS = StdioServerParameters(command="uv", args=["run", "mcp_web_server.py"])
 
 
 def _server_is_alive() -> bool:
@@ -155,7 +157,10 @@ def _with_tool_system_prompt(
     ]
 
 
-async def _run_tool_call(session: ClientSession, tool_call: ChatCompletionMessageToolCall) -> str:
+async def _run_tool_call(
+    sessions: dict[str, ClientSession],
+    tool_call: ChatCompletionMessageToolCall,
+) -> str:
     name = tool_call.function.name
     try:
         arguments = json.loads(tool_call.function.arguments)
@@ -163,6 +168,10 @@ async def _run_tool_call(session: ClientSession, tool_call: ChatCompletionMessag
         raise RuntimeError(
             f"Invalid tool arguments for {name}: {tool_call.function.arguments}"
         ) from exc
+
+    session = sessions.get(name)
+    if session is None:
+        return json.dumps({"error": f"No MCP session found for tool '{name}'"})
 
     result = await session.call_tool(name, arguments)
     texts: list[str] = []
@@ -180,11 +189,27 @@ async def _prepare_messages_for_streaming(
 ) -> list[ChatCompletionMessageParam]:
     prepared_messages = _with_tool_system_prompt(messages)
 
-    async with stdio_client(_MCP_SERVER_PARAMS) as (read, write):
-        async with ClientSession(read, write) as session:
-            await session.initialize()
-            tool_list = await session.list_tools()
-            openai_tools = mcp_tools_to_openai(tool_list.tools)
+    async with (
+        stdio_client(_MCP_FACTORY_PARAMS) as (r_factory, w_factory),
+        stdio_client(_MCP_WEB_PARAMS) as (r_web, w_web),
+    ):
+        async with (
+            ClientSession(r_factory, w_factory) as factory_session,
+            ClientSession(r_web, w_web) as web_session,
+        ):
+            await factory_session.initialize()
+            await web_session.initialize()
+
+            factory_tools = await factory_session.list_tools()
+            web_tools = await web_session.list_tools()
+
+            openai_tools = mcp_tools_to_openai(factory_tools.tools + web_tools.tools)
+
+            tool_sessions: dict[str, ClientSession] = {}
+            for t in factory_tools.tools:
+                tool_sessions[t.name] = factory_session
+            for t in web_tools.tools:
+                tool_sessions[t.name] = web_session
 
             for _ in range(5):
                 response = _client.chat.completions.create(
@@ -197,7 +222,7 @@ async def _prepare_messages_for_streaming(
 
                 prepared_messages.append(cast(ChatCompletionMessageParam, message.to_dict()))
                 for tool_call in message.tool_calls:
-                    tool_result = await _run_tool_call(session, tool_call)
+                    tool_result = await _run_tool_call(tool_sessions, tool_call)
                     prepared_messages.append(
                         cast(
                             ChatCompletionMessageParam,
