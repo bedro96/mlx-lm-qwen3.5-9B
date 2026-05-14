@@ -41,13 +41,12 @@ _THINKING_MAX_TOKENS = 16384
 _NO_THINK_TEMPERATURE = 0.7
 _NO_THINK_TOP_P = 0.8
 _NO_THINK_TOP_K = 20
-_NO_THINK_MAX_TOKENS = 8192
+_NO_THINK_MAX_TOKENS = 10240
 
 _TOOL_PROMPT_SUFFIX = (
-    "You have access to real-time factory sensor tools. "
-    "When a user asks about machine temperatures or factory conditions, "
+    "You are master of solving difficult problems."
+    "When a user asks about general query try to answer with best of your knowledge. "
     "use the available tools to get actual sensor data before answering. "
-    "Always call get_machine_temperature or list_machines when relevant."
 )
 _TOOL_AWARE_SYSTEM_PROMPT = f"{SYSTEM_PROMPT}\n\n{_TOOL_PROMPT_SUFFIX}"
 _MCP_SERVER_PARAMS = StdioServerParameters(command="uv", args=["run", "mcp_server.py"])
