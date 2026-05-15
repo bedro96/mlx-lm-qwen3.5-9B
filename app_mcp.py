@@ -12,15 +12,17 @@ from __future__ import annotations
 import asyncio
 import json
 import subprocess  # nosec B404 - fixed local process launch for the MLX server
+import threading
 import time
 from collections.abc import Generator
+from concurrent.futures import Future
 from typing import Any, cast
 
 import httpx
 from flask import Flask, Response, render_template, request, stream_with_context
 from mcp import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
-from openai.types.chat import ChatCompletionMessageParam, ChatCompletionMessageToolCall
+from openai.types.chat import ChatCompletionMessageParam
 
 from client import (
     BASE_URL,
@@ -157,82 +159,141 @@ def _with_tool_system_prompt(
     ]
 
 
-async def _run_tool_call(
-    sessions: dict[str, ClientSession],
-    tool_call: ChatCompletionMessageToolCall,
-) -> str:
-    name = tool_call.function.name
-    try:
-        arguments = json.loads(tool_call.function.arguments)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError(
-            f"Invalid tool arguments for {name}: {tool_call.function.arguments}"
-        ) from exc
+class _MCPManager:
+    """Manages persistent stdio connections to both MCP servers.
 
-    session = sessions.get(name)
-    if session is None:
-        return json.dumps({"error": f"No MCP session found for tool '{name}'"})
+    Starts a dedicated asyncio event loop in a background thread so MCP
+    sessions remain open for the lifetime of the Flask process.  Flask
+    request handlers call the synchronous ``call_tool`` / ``get_tools``
+    methods; the heavy async lifting happens inside the background loop.
+    """
 
-    result = await session.call_tool(name, arguments)
-    texts: list[str] = []
-    for block in result.content:
-        text = getattr(block, "text", None)
-        if isinstance(text, str):
-            texts.append(text)
-    return "\n".join(texts)
+    def __init__(self) -> None:
+        self._loop: asyncio.AbstractEventLoop = asyncio.new_event_loop()
+        self._thread = threading.Thread(target=self._run, daemon=True, name="mcp-manager")
+        self._tools: list[dict[str, Any]] = []
+        self._tool_sessions: dict[str, ClientSession] = {}
+        self._ready = threading.Event()
+        self._stop: asyncio.Event | None = None
+        self._error: BaseException | None = None
+
+    # ------------------------------------------------------------------
+    # Public interface (called from Flask threads)
+    # ------------------------------------------------------------------
+
+    def start(self) -> None:
+        """Start the background loop and block until both MCP servers are ready."""
+        self._thread.start()
+        if not self._ready.wait(timeout=60):
+            raise RuntimeError("MCP servers did not become ready within 60 s.")
+        if self._error:
+            raise self._error
+
+    def get_tools(self) -> list[dict[str, Any]]:
+        """Return the combined OpenAI-format tool list (empty if not started)."""
+        return self._tools
+
+    def call_tool(self, name: str, arguments: dict[str, Any]) -> str:
+        """Synchronously execute an MCP tool and return its text result."""
+        fut: Future[str] = Future()
+        asyncio.run_coroutine_threadsafe(self._call_tool_async(name, arguments, fut), self._loop)
+        return fut.result(timeout=60)
+
+    # ------------------------------------------------------------------
+    # Internal async implementation (runs inside _loop)
+    # ------------------------------------------------------------------
+
+    async def _call_tool_async(self, name: str, arguments: dict[str, Any], fut: Future[str]) -> None:
+        try:
+            session = self._tool_sessions.get(name)
+            if session is None:
+                fut.set_result(json.dumps({"error": f"No MCP session for tool '{name}'"}))
+                return
+            result = await session.call_tool(name, arguments)
+            texts = [
+                block.text
+                for block in result.content
+                if isinstance(getattr(block, "text", None), str)
+            ]
+            fut.set_result("\n".join(texts))
+        except Exception as exc:  # noqa: BLE001
+            fut.set_exception(exc)
+
+    def _run(self) -> None:
+        asyncio.set_event_loop(self._loop)
+        self._loop.run_until_complete(self._main())
+
+    async def _main(self) -> None:
+        self._stop = asyncio.Event()
+        try:
+            async with (
+                stdio_client(_MCP_FACTORY_PARAMS) as (r_f, w_f),
+                stdio_client(_MCP_WEB_PARAMS) as (r_w, w_w),
+            ):
+                async with (
+                    ClientSession(r_f, w_f) as factory_session,
+                    ClientSession(r_w, w_w) as web_session,
+                ):
+                    await factory_session.initialize()
+                    await web_session.initialize()
+
+                    ft = await factory_session.list_tools()
+                    wt = await web_session.list_tools()
+
+                    self._tools = mcp_tools_to_openai(ft.tools + wt.tools)
+                    for t in ft.tools:
+                        self._tool_sessions[t.name] = factory_session
+                    for t in wt.tools:
+                        self._tool_sessions[t.name] = web_session
+
+                    self._ready.set()  # unblock Flask startup
+                    await self._stop.wait()  # keep sessions alive until shutdown
+        except Exception as exc:  # noqa: BLE001
+            self._error = exc
+            self._ready.set()
 
 
-async def _prepare_messages_for_streaming(
+_mcp = _MCPManager()
+
+
+def _prepare_messages_for_streaming(
     model: str,
     messages: list[ChatCompletionMessageParam],
     enable_thinking: bool,
 ) -> list[ChatCompletionMessageParam]:
+    """Run the tool-calling loop (sync) and return the prepared message list."""
     prepared_messages = _with_tool_system_prompt(messages)
+    openai_tools = _mcp.get_tools()
 
-    async with (
-        stdio_client(_MCP_FACTORY_PARAMS) as (r_factory, w_factory),
-        stdio_client(_MCP_WEB_PARAMS) as (r_web, w_web),
-    ):
-        async with (
-            ClientSession(r_factory, w_factory) as factory_session,
-            ClientSession(r_web, w_web) as web_session,
-        ):
-            await factory_session.initialize()
-            await web_session.initialize()
+    for _ in range(5):
+        response = _client.chat.completions.create(
+            **_build_request_args(model, prepared_messages, openai_tools, enable_thinking)
+        )
+        message = response.choices[0].message
 
-            factory_tools = await factory_session.list_tools()
-            web_tools = await web_session.list_tools()
+        if not message.tool_calls:
+            return prepared_messages
 
-            openai_tools = mcp_tools_to_openai(factory_tools.tools + web_tools.tools)
-
-            tool_sessions: dict[str, ClientSession] = {}
-            for t in factory_tools.tools:
-                tool_sessions[t.name] = factory_session
-            for t in web_tools.tools:
-                tool_sessions[t.name] = web_session
-
-            for _ in range(5):
-                response = _client.chat.completions.create(
-                    **_build_request_args(model, prepared_messages, openai_tools, enable_thinking)
+        prepared_messages.append(cast(ChatCompletionMessageParam, message.to_dict()))
+        for tool_call in message.tool_calls:
+            try:
+                arguments = json.loads(tool_call.function.arguments)
+            except json.JSONDecodeError as exc:
+                raise RuntimeError(
+                    f"Invalid tool arguments for {tool_call.function.name}: "
+                    f"{tool_call.function.arguments}"
+                ) from exc
+            tool_result = _mcp.call_tool(tool_call.function.name, arguments)
+            prepared_messages.append(
+                cast(
+                    ChatCompletionMessageParam,
+                    {
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "content": tool_result,
+                    },
                 )
-                message = response.choices[0].message
-
-                if not message.tool_calls:
-                    return prepared_messages
-
-                prepared_messages.append(cast(ChatCompletionMessageParam, message.to_dict()))
-                for tool_call in message.tool_calls:
-                    tool_result = await _run_tool_call(tool_sessions, tool_call)
-                    prepared_messages.append(
-                        cast(
-                            ChatCompletionMessageParam,
-                            {
-                                "role": "tool",
-                                "tool_call_id": tool_call.id,
-                                "content": tool_result,
-                            },
-                        )
-                    )
+            )
 
     raise RuntimeError("Tool-calling loop exceeded the maximum number of rounds.")
 
@@ -246,8 +307,9 @@ def index() -> str:
 def models() -> Response:
     ensure_mlx_server()
     model = resolve_model(_client)
+    tool_names = [t["function"]["name"] for t in _mcp.get_tools()]
     return Response(
-        json.dumps({"model": model, "mcp_transport": "stdio"}),
+        json.dumps({"model": model, "mcp_transport": "stdio", "tools": tool_names}),
         content_type="application/json",
     )
 
@@ -273,9 +335,7 @@ def chat() -> Response:
         try:
             ensure_mlx_server()
             model = resolve_model(_client)
-            prepared_messages = asyncio.run(
-                _prepare_messages_for_streaming(model, messages, enable_thinking)
-            )
+            prepared_messages = _prepare_messages_for_streaming(model, messages, enable_thinking)
 
             if enable_thinking:
                 for kind, token in stream_reply_with_thinking(_client, model, prepared_messages):
@@ -303,4 +363,5 @@ def chat() -> Response:
 
 if __name__ == "__main__":
     ensure_mlx_server()
+    _mcp.start()
     app.run(debug=False, threaded=True)
